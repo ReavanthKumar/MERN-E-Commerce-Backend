@@ -8,59 +8,60 @@ const multer = require("multer");
 const path = require("path");
 const cors = require("cors");
 
+const cloudinary = require("cloudinary").v2;
+const { CloudinaryStorage } = require("multer-storage-cloudinary");
+
 app.use(express.json());
 app.use(cors());
 
-// --- 1. IMPROVED DATABASE CONNECTION ---
-// Prevents multiple connections in serverless environments
-const connectDB = async () => {
-    if (mongoose.connection.readyState >= 1) return;
-    try {
-        await mongoose.connect(process.env.MONGO_URL);
-        console.log("Connected to MongoDB");
-    } catch (err) {
-        console.error("Failed to connect to MongoDB", err);
-    }
-};
-connectDB();
+// Database Connection With MongoDB
+mongoose.connect(process.env.MONGO_URL)
+    .then(() => console.log("Connected to MongoDB"))
+    .catch(err => console.log("Failed to connect to MongoDB", err));
 
-// --- 2. SWITCH TO MEMORY STORAGE ---
-// This stops the EROFS: read-only file system error
-const storage = multer.memoryStorage(); 
-const upload = multer({ storage: storage });
-
-// NOTE: For a real e-commerce site on Vercel, you should upload 
-// the 'req.file.buffer' to Cloudinary here.
-app.post("/upload", upload.single('product'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ success: 0, message: "No file uploaded" });
-    }
-    
-    // TEMPORARY placeholder since local storage is disabled
-    res.json({
-        success: 1,
-        image_url: `IMAGE_UPLOADED_TO_MEMORY_PROCESSED_SUCCESSFULLY`,
-        note: "To save permanently, integrate Cloudinary here."
-    });
+// Cloudinary Configuration
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-// Remove this line on Vercel as it won't work for dynamically uploaded files
-// app.use('/images', express.static('upload/images'));
+// Cloudinary Storage Engine
+const storage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: {
+        folder: 'ecommerce_images',
+        allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+    },
+});
 
-// --- 3. MIDDLEWARE & SCHEMAS (Keep as is, but add _id fix) ---
+const upload = multer({ storage: storage });
+app.post("/upload", upload.single('product'), (req, res) => {
+    res.json({
+        success: 1,
+        image_url: req.file.path // Cloudinary returns the URL in req.file.path
+    });
+});
+// app.use('/images', express.static('upload/images')); // No longer needed
+
+
+// Middleware to fetch user from database
 const fetchuser = async (req, res, next) => {
     const token = req.header("auth-token");
-    if (!token) return res.status(401).send({ errors: "Please authenticate using a valid token" });
+    if (!token) {
+        return res.status(401).send({ errors: "Please authenticate using a valid token" });
+    }
     try {
         const data = jwt.verify(token, process.env.JWT_SECRET);
         req.user = data.user;
         next();
     } catch (error) {
-        res.status(401).send({ errors: "Please authenticate using a valid token" });
+        return res.status(401).send({ errors: "Please authenticate using a valid token" });
     }
 };
 
-const Users = mongoose.models.Users || mongoose.model("Users", {
+// Schema for creating user model
+const Users = mongoose.model("Users", {
     name: { type: String },
     email: { type: String, unique: true },
     password: { type: String },
@@ -68,7 +69,8 @@ const Users = mongoose.models.Users || mongoose.model("Users", {
     date: { type: Date, default: Date.now },
 });
 
-const Product = mongoose.models.Product || mongoose.model("Product", {
+// Schema for creating Product
+const Product = mongoose.model("Product", {
     id: { type: Number, required: true },
     name: { type: String, required: true },
     image: { type: String, required: true },
@@ -79,29 +81,123 @@ const Product = mongoose.models.Product || mongoose.model("Product", {
     available: { type: Boolean, default: true },
 });
 
-// --- 4. UPDATED CART LOGIC (Fixed _id usage) ---
-app.post('/addtocart', fetchuser, async (req, res) => {
-    // req.user.id from JWT must match the MongoDB _id
-    let userData = await Users.findOne({ _id: req.user.id });
-    if(!userData) return res.status(404).send("User not found");
+app.get("/", (req, res) => {
+    res.send("Root");
+});
 
-    let cartData = userData.cartData;
-    cartData[req.body.itemId] = (cartData[req.body.itemId] || 0) + 1;
-    
-    await Users.findOneAndUpdate({ _id: req.user.id }, { cartData: cartData });
+app.post('/login', async (req, res) => {
+    let success = false;
+    let user = await Users.findOne({ email: req.body.email });
+    if (user) {
+        const passCompare = req.body.password === user.password;
+        if (passCompare) {
+            const data = { user: { id: user.id } };
+            success = true;
+            const token = jwt.sign(data, process.env.JWT_SECRET);
+            res.json({ success, token });
+        } else {
+            return res.status(400).json({ success: false, errors: "Please try with correct email/password" });
+        }
+    } else {
+        return res.status(400).json({ success: false, errors: "Please try with correct email/password" });
+    }
+});
+
+app.post('/signup', async (req, res) => {
+    let success = false;
+    let check = await Users.findOne({ email: req.body.email });
+    if (check) {
+        return res.status(400).json({ success: false, errors: "Existing user found with this email" });
+    }
+    let cart = {};
+    for (let i = 0; i < 300; i++) {
+        cart[i] = 0;
+    }
+    const user = new Users({
+        name: req.body.username,
+        email: req.body.email,
+        password: req.body.password,
+        cartData: cart,
+    });
+    await user.save();
+    const data = { user: { id: user.id } };
+    const token = jwt.sign(data, process.env.JWT_SECRET);
+    success = true;
+    res.json({ success, token });
+});
+
+app.get("/allproducts", async (req, res) => {
+    let products = await Product.find({});
+    res.send(products);
+});
+
+app.get("/newcollections", async (req, res) => {
+    let products = await Product.find({});
+    let arr = products.slice(1).slice(-8);
+    res.send(arr);
+});
+
+app.get("/popularinwomen", async (req, res) => {
+    let products = await Product.find({});
+    let arr = products.splice(0, 4);
+    res.send(arr);
+});
+
+app.post('/addtocart', fetchuser, async (req, res) => {
+    let userData = await Users.findOne({ _id: req.user.id });
+    userData.cartData[req.body.itemId] += 1;
+    await Users.findOneAndUpdate({ _id: req.user.id }, { cartData: userData.cartData });
     res.send("Added");
 });
 
-// ... Keep other routes (signup, login, etc.) as they were ...
-
-app.get("/", (req, res) => {
-    res.send("Express App is Running");
+app.post('/removefromcart', fetchuser, async (req, res) => {
+    let userData = await Users.findOne({ _id: req.user.id });
+    if (userData.cartData[req.body.itemId] != 0) {
+        userData.cartData[req.body.itemId] -= 1;
+    }
+    await Users.findOneAndUpdate({ _id: req.user.id }, { cartData: userData.cartData });
+    res.send("Removed");
 });
 
-app.listen(port, (error) => {
-    if (!error) console.log("Server Running on port " + port);
-    else console.log("Error: ", error);
+app.post('/getcart', fetchuser, async (req, res) => {
+    let userData = await Users.findOne({ _id: req.user.id });
+    res.json(userData.cartData);
 });
 
-// Export for Vercel
+app.post("/addproduct", async (req, res) => {
+    let products = await Product.find({});
+    let id;
+    if (products.length > 0) {
+        let last_product_array = products.slice(-1);
+        let last_product = last_product_array[0];
+        id = last_product.id + 1;
+    } else {
+        id = 1;
+    }
+    const product = new Product({
+        id: id,
+        name: req.body.name,
+        image: req.body.image,
+        category: req.body.category,
+        new_price: req.body.new_price,
+        old_price: req.body.old_price,
+    });
+    await product.save();
+    res.json({ success: true, name: req.body.name });
+});
+
+app.post("/removeproduct", async (req, res) => {
+    const product = await Product.findOneAndDelete({ id: req.body.id });
+    res.json({ success: true, name: req.body.name });
+});
+
+if (require.main === module) {
+    app.listen(port, (error) => {
+        if (!error)
+            console.log("Server Running on port " + port);
+        else
+            console.log("Error: ", error);
+    });
+}
+
 module.exports = app;
